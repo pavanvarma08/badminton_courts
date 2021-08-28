@@ -18,7 +18,6 @@ Options:
     --fill-courts        will fill courts
 """
 
-
 import requests
 import html
 import datetime
