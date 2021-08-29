@@ -4,11 +4,13 @@
 Book badminton courts at sportsarenan
 
 PREREQUISTE:
-    Set your cookies as environmental variable (COOKIES) which is used for fetching user's booked courts and to book new courts
+    1) Set your cookies as environmental variable (COOKIES) which is used for fetching user's booked courts and to book new courts
     You can find the cookies in the network tab when you login to https://www.sportarenan.se/
+    2) Store your calendar API OAUTH credentails info in credentials.json file, in order to create an event.
 
 Usage:
     book_badminton_courts.py [--start-time <name>] [--courts <num>] [--duration <num>] [--book-courts] [--fill-courts]
+                             [--email-list <str>]
 
 Options:
     --start-time <name>  start time of courts [default: 17:00]
@@ -16,16 +18,23 @@ Options:
     --duration <num>     duration of courts [default: 2]
     --book-courts        Will book courts
     --fill-courts        will fill courts
+    --email-list <str>   comma separated emails, to send notifications of booked courts
 """
 
 import requests
 import html
-import datetime
+from datetime import datetime, timedelta
 import os
 import json
 import logging
 from docopt import docopt
 from bs4 import BeautifulSoup
+
+# Google calender API
+import pickle
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
 
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s")
@@ -80,7 +89,7 @@ def get_booking_times():
 
     html_doc = html.unescape(res.text)
     soup1 = BeautifulSoup(html_doc, "html.parser")
-    year = datetime.datetime.now().year
+    year = datetime.now().year
 
     booked_slots_html = soup1.find_all("tr", attrs={"class": "values"})
 
@@ -88,21 +97,21 @@ def get_booking_times():
     for booked_slot_html in booked_slots_html:
 
         if booked_slot_html.find_all("td")[0].contents[0] == "Idag":
-            date = datetime.datetime.now().strftime("%Y-%m-%d")
+            date = datetime.now().strftime("%Y-%m-%d")
         else:
             date = booked_slot_html.find_all("td")[0].contents[2]
             date = f"{year}/{date}"
-            date = datetime.datetime.strptime(date, "%Y/%d/%m").strftime("%Y-%m-%d")
+            date = datetime.strptime(date, "%Y/%d/%m").strftime("%Y-%m-%d")
 
         if not booked_times.get(date):
             booked_times[date] = {}
 
         start_time = booked_slot_html.find_all("td")[1].contents[0]
         duration = booked_slot_html.find_all("td")[1].contents[2][0]
-        start_time_obj = datetime.datetime.strptime(start_time, "%H:%M")
+        start_time_obj = datetime.strptime(start_time, "%H:%M")
 
         for i in range(int(duration)):
-            next_start_time_obj = start_time_obj + datetime.timedelta(hours=i)
+            next_start_time_obj = start_time_obj + timedelta(hours=i)
             next_start_time = next_start_time_obj.strftime("%H:%M")
 
             if not booked_times[date].get(next_start_time):
@@ -113,7 +122,7 @@ def get_booking_times():
     return booked_times
 
 
-def check_book_time_slots(availability, booked, num_of_courts):
+def check_book_time_slots(availability, booked, num_of_courts, email_list):
     logger.info("Checking if they are any bookable slots")
     for date, time_slots in booked.items():
         bookable_time_slots = [
@@ -125,11 +134,13 @@ def check_book_time_slots(availability, booked, num_of_courts):
             time_slot in availability.get(date) for time_slot in bookable_time_slots
         ):
             book_time_slots(date, bookable_time_slots)
+            create_calender_event(date, email_list)
 
 
 def book_time_slots(date, time_slots):
     logger.info(f"Booking {date}: {time_slots}")
-    if date == datetime.datetime.now().strftime("%Y-%m-%d"):
+
+    if date == datetime.now().strftime("%Y-%m-%d"):
         logger.warning(f"Skipped booking slots for the same date:{date}")
         return
 
@@ -157,10 +168,10 @@ def book_time_slots(date, time_slots):
 
 def get_available_slots_upto_given_days(days: int, time_slots):
     logger.info(f"Fetch available time slots for the next {days} days")
-    today = datetime.datetime.now()
+    today = datetime.now()
     availability = {}
     for i in range(days):
-        req_date = today + datetime.timedelta(days=i)
+        req_date = today + timedelta(days=i)
 
         if req_date.weekday() > 4:
             continue
@@ -171,30 +182,111 @@ def get_available_slots_upto_given_days(days: int, time_slots):
     return availability
 
 
-def book_from_booked_times(time_slots, num_of_courts):
+def book_from_booked_times(time_slots, num_of_courts, email_list):
     booked = get_booking_times()
     availability = get_available_slots_upto_given_days(16, time_slots)
-    check_book_time_slots(availability, booked, num_of_courts)
+    check_book_time_slots(availability, booked, num_of_courts, email_list)
 
 
-def book_courts_on_desired_date(days, time_slots, num_of_courts):
-    today = datetime.datetime.now()
-    req_date = today + datetime.timedelta(days=days)
+def book_courts_on_desired_date(days, time_slots, num_of_courts, email_list):
+    today = datetime.now()
+    req_date = today + timedelta(days=days)
     req_date = req_date.strftime("%Y-%m-%d")
 
     for _ in range(num_of_courts):
         book_time_slots(req_date, time_slots)
 
+    create_calender_event(req_date, email_list)
+
 
 def get_time_slots(start_time, duration):
     timeslots = [start_time]
     for _ in range(1, duration):
-        start_time_obj = datetime.datetime.strptime(start_time, "%H:%M")
-        next_time_obj = start_time_obj + datetime.timedelta(hours=1)
+        start_time_obj = datetime.strptime(start_time, "%H:%M")
+        next_time_obj = start_time_obj + timedelta(hours=1)
         next_time = next_time_obj.strftime("%H:%M")
         timeslots.append(next_time)
         start_time = next_time
     return timeslots
+
+
+def get_calendar_service():
+    # code from quickstart page: https://developers.google.com/calendar/api/quickstart/python
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    scopes = ["https://www.googleapis.com/auth/calendar"]
+    credentails_file = os.path.join(current_dir, "credentials.json")
+
+    if not credentails_file:
+        logger.error(
+            f"cannot create calendar event without credentials file: {credentails_file}"
+        )
+
+    creds = None
+    if os.path.exists("token.pickle"):
+        with open("token.pickle", "rb") as token:
+            creds = pickle.load(token)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(credentails_file, scopes)
+            creds = flow.run_local_server(port=0)
+        with open("token.pickle", "wb") as token:
+            pickle.dump(creds, token)
+    service = build("calendar", "v3", credentials=creds)
+    return service
+
+
+def get_booked_time_slot(date):
+    booked_times = get_booking_times()
+    return booked_times.get(date)
+
+
+def create_calender_event(date, email_list=[]):
+    service = get_calendar_service()
+    time_slots = get_booked_time_slot(date)
+    if not time_slots:
+        logger.error("Nothing booked for today, skipped creating event")
+
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    start_time_str = list(time_slots.keys())[0]
+    start_time_hour = int(start_time_str.split(":")[0])
+    duration = len(time_slots)
+    start_time = datetime(date_obj.year, date_obj.month, date_obj.day, start_time_hour)
+    end_time = start_time + timedelta(hours=duration)
+    attendees = [{"email": email} for email in email_list]
+
+    event_result = (
+        service.events()
+        .insert(
+            calendarId="primary",
+            body={
+                "summary": f"Badminton {list(time_slots.values())} (A)",
+                "description": "This is an automated event",
+                "start": {
+                    "dateTime": start_time.isoformat(),
+                    "timeZone": "Europe/Stockholm",
+                },
+                "end": {
+                    "dateTime": end_time.isoformat(),
+                    "timeZone": "Europe/Stockholm",
+                },
+                "location": "Sportarenan, Bergsätersgatan 21, 421 66 Västra Frölunda, Sweden",
+                "sendNotifications": "true",
+                "reminders": {
+                    "useDefault": "false",
+                    "overrides": [{"method": "popup", "minutes": 540}],
+                },
+                "attendees": attendees,
+            },
+        )
+        .execute()
+    )
+
+    logger.info(
+        f"created event: {event_result['summary']}. Time: {event_result['start']['dateTime']} - {event_result['end']['dateTime']}"
+    )
 
 
 def setup_logger(_logger):
@@ -215,21 +307,21 @@ def main():
     start_time = args["--start-time"]
     duration = int(args["--duration"])
     courts = int(args["--courts"])
-
+    email_list = args["--email-list"].split(",") if args["--email-list"] else []
     time_slots = get_time_slots(start_time, duration)
 
     if args["--book-courts"]:
         logger.info(
             f"Book courts with start time {start_time}, duration: {duration} & courts: {courts}"
         )
-        days = 2  # 2 weeks
-        book_courts_on_desired_date(days, time_slots, courts)
+        days = 14  # 2 weeks
+        book_courts_on_desired_date(days, time_slots, courts, email_list)
 
     if args["--fill-courts"]:
         logger.info(
             f"Fill courts with start time {start_time}, duration: {duration} & courts: {courts}"
         )
-        book_from_booked_times(time_slots, courts)
+        book_from_booked_times(time_slots, courts, email_list)
 
 
 if __name__ == "__main__":
