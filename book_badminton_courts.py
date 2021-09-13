@@ -119,6 +119,7 @@ def get_booking_times():
 
             booked_times[date][next_start_time] += 1
 
+    logger.info(f"Booked slots: {booked_times}")
     return booked_times
 
 
@@ -134,12 +135,11 @@ def check_book_time_slots(availability, booked, num_of_courts, email_list):
             time_slot in availability.get(date) for time_slot in bookable_time_slots
         ):
             book_time_slots(date, bookable_time_slots)
-            create_calender_event(date, email_list)
+            generate_calendar_event(date, email_list)
 
 
 def book_time_slots(date, time_slots):
     logger.info(f"Booking {date}: {time_slots}")
-
     if date == datetime.now().strftime("%Y-%m-%d"):
         logger.warning(f"Skipped booking slots for the same date:{date}")
         return
@@ -178,7 +178,7 @@ def get_available_slots_upto_given_days(days: int, time_slots):
 
         req_date = req_date.strftime("%Y-%m-%d")
         availability.update(get_available_slots(req_date, time_slots))
-
+    logger.info(f"Available slots: {availability}")
     return availability
 
 
@@ -196,7 +196,7 @@ def book_courts_on_desired_date(days, time_slots, num_of_courts, email_list):
     for _ in range(num_of_courts):
         book_time_slots(req_date, time_slots)
 
-    create_calender_event(req_date, email_list)
+    generate_calendar_event(req_date, email_list)
 
 
 def get_time_slots(start_time, duration):
@@ -243,12 +243,82 @@ def get_booked_time_slot(date):
     return booked_times.get(date)
 
 
-def create_calender_event(date, email_list=[]):
+def get_badminton_event(date):
+    service = get_calendar_service()
+
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    day_start_time = (
+        datetime(
+            date_obj.year, date_obj.month, date_obj.day, hour=0, minute=0
+        ).isoformat()
+        + "Z"
+    )
+    day_end_time = (
+        datetime(
+            date_obj.year, date_obj.month, date_obj.day, hour=23, minute=59
+        ).isoformat()
+        + "Z"
+    )
+    events_result = (
+        service.events()
+        .list(
+            calendarId="primary",
+            timeMin=day_start_time,
+            timeMax=day_end_time,
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+    events = events_result.get("items", [])
+
+    for event in events:
+        if "Badminton" in event.get("summary"):
+            event_id = event.get("id")
+            return event_id
+
+
+def update_calendar_event(service, event_id, event_body):
+    event_result = (
+        service.events()
+        .update(
+            calendarId="primary",
+            eventId=event_id,
+            body=event_body,
+        )
+        .execute()
+    )
+    logger.info(
+        f"Updated event: {event_result['summary']}. Time: {event_result['start']['dateTime']} - {event_result['end']['dateTime']}"
+    )
+
+
+def create_calender_event(service, event_body):
+    event_result = (
+        service.events()
+        .insert(
+            calendarId="primary",
+            body=event_body,
+        )
+        .execute()
+    )
+
+    logger.info(
+        f"created event: {event_result['summary']}. Time: {event_result['start']['dateTime']} - {event_result['end']['dateTime']}"
+    )
+
+
+def generate_calendar_event(date, email_list=[]):
     service = get_calendar_service()
     time_slots = get_booked_time_slot(date)
+
+    if date == datetime.now().strftime("%Y-%m-%d"):
+        logger.warning(f"Skipped creating event for the same date:{date}")
+        return
+
     if not time_slots:
         logger.error("Nothing booked for today, skipped creating event")
-
+        return
     date_obj = datetime.strptime(date, "%Y-%m-%d")
     start_time_str = list(time_slots.keys())[0]
     start_time_hour = int(start_time_str.split(":")[0])
@@ -257,36 +327,33 @@ def create_calender_event(date, email_list=[]):
     end_time = start_time + timedelta(hours=duration)
     attendees = [{"email": email} for email in email_list]
 
-    event_result = (
-        service.events()
-        .insert(
-            calendarId="primary",
-            body={
-                "summary": f"Badminton {list(time_slots.values())} (A)",
-                "description": "This is an automated event",
-                "start": {
-                    "dateTime": start_time.isoformat(),
-                    "timeZone": "Europe/Stockholm",
-                },
-                "end": {
-                    "dateTime": end_time.isoformat(),
-                    "timeZone": "Europe/Stockholm",
-                },
-                "location": "Sportarenan, Bergsätersgatan 21, 421 66 Västra Frölunda, Sweden",
-                "sendNotifications": "true",
-                "reminders": {
-                    "useDefault": "false",
-                    "overrides": [{"method": "popup", "minutes": 540}],
-                },
-                "attendees": attendees,
-            },
-        )
-        .execute()
-    )
+    event_body = {
+        "summary": f"Badminton {list(time_slots.values())} (A)",
+        "description": "This is an automated event",
+        "start": {
+            "dateTime": start_time.isoformat(),
+            "timeZone": "Europe/Stockholm",
+        },
+        "end": {
+            "dateTime": end_time.isoformat(),
+            "timeZone": "Europe/Stockholm",
+        },
+        "location": "Sportarenan, Bergsätersgatan 21, 421 66 Västra Frölunda, Sweden",
+        "sendNotifications": "true",
+        "sendUpdates": "all",
+        "reminders": {
+            "useDefault": "false",
+            "overrides": [{"method": "popup", "minutes": 540}],
+        },
+        "attendees": attendees,
+    }
 
-    logger.info(
-        f"created event: {event_result['summary']}. Time: {event_result['start']['dateTime']} - {event_result['end']['dateTime']}"
-    )
+    event_id = get_badminton_event(date)
+    if event_id:
+        update_calendar_event(service, event_id, event_body)
+    else:
+        create_calender_event(service, event_body)
+    logger.info(f"Attendes: {str(email_list)}")
 
 
 def setup_logger(_logger):
